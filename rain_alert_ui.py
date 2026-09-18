@@ -151,4 +151,3 @@ st.divider()
 
 st.subheader(f"TOMORROW — {tomorrow.strftime('%a, %d %b')}")
 render_day_text(forecast, tomorrow, config.rain_threshold, "tomorrow", is_today=False)
-
