@@ -37,14 +37,15 @@ def load_config() -> ra.AppConfig:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_forecast(lat: float, lon: float, address: str) -> dict:
-    """Cached for 10 minutes so slider changes don't re-hit the API.
+def fetch_forecast(lat: float, lon: float, address: str, forecast_days: int = 2) -> dict:
+    """Cached for 10 minutes so slider/toggle changes don't re-hit the API.
 
     Plain floats/strings as args (not the Location dataclass) keep the
-    cache key hashable.
+    cache key hashable. forecast_days is part of the key so switching
+    between the 2-day and 7-day view re-fetches only when needed.
     """
     loc = ra.Location(address=address, latitude=lat, longitude=lon)
-    return ra.WeatherService.get_hourly_forecast(loc, forecast_days=2)
+    return ra.WeatherService.get_hourly_forecast(loc, forecast_days=forecast_days)
 
 
 def render_day_text(forecast: dict, on_date: date, threshold: int, day_label: str, is_today: bool) -> None:
@@ -95,6 +96,12 @@ with st.sidebar:
 
     st.divider()
 
+    forecast_range = st.radio(
+        "Forecast range",
+        ["Today & Tomorrow", "Next 7 Days"],
+        index=1,
+    )
+
     threshold = st.slider(
         "Rain threshold (%)",
         min_value=0,
@@ -130,24 +137,38 @@ if not config.location:
 
 st.caption(f"Forecast for **{config.location.address}** · threshold {config.rain_threshold}%")
 
+forecast_days = 7 if forecast_range == "Next 7 Days" else 2
+
 try:
     with st.spinner("Fetching forecast…"):
         forecast = fetch_forecast(
             config.location.latitude,
             config.location.longitude,
             config.location.address,
+            forecast_days,
         )
 except ra.WeatherServiceError as exc:
     st.error(f"⚠️ {exc}")
     st.stop()
 
 today = date.today()
-tomorrow = today + timedelta(days=1)
 
-st.subheader(f"TODAY — {today.strftime('%a, %d %b')}")
-render_day_text(forecast, today, config.rain_threshold, "today", is_today=True)
+if forecast_range == "Next 7 Days":
+    for offset in range(7):
+        d = today + timedelta(days=offset)
+        label, is_today = ra.day_label_for_offset(d, offset)
+        header = "TODAY" if offset == 0 else "TOMORROW" if offset == 1 else d.strftime("%A").upper()
+        st.subheader(f"{header} — {d.strftime('%a, %d %b')}")
+        render_day_text(forecast, d, config.rain_threshold, label, is_today=is_today)
+        if offset < 6:
+            st.divider()
+else:
+    tomorrow = today + timedelta(days=1)
 
-st.divider()
+    st.subheader(f"TODAY — {today.strftime('%a, %d %b')}")
+    render_day_text(forecast, today, config.rain_threshold, "today", is_today=True)
 
-st.subheader(f"TOMORROW — {tomorrow.strftime('%a, %d %b')}")
-render_day_text(forecast, tomorrow, config.rain_threshold, "tomorrow", is_today=False)
+    st.divider()
+
+    st.subheader(f"TOMORROW — {tomorrow.strftime('%a, %d %b')}")
+    render_day_text(forecast, tomorrow, config.rain_threshold, "tomorrow", is_today=False)
