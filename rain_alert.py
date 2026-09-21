@@ -9,7 +9,8 @@ A conversational assistant that:
      "set threshold ...", "help", "exit".
   3. Uses the free Open-Meteo APIs (no API key required) to:
        - geocode your address into latitude/longitude
-       - pull today's AND tomorrow's hourly precipitation-probability forecast
+       - pull hourly precipitation-probability forecasts for today, tomorrow,
+         or the next 7 days
        - tell you exactly which hours rain is expected on each day, and
          alert you if rain is likely soon.
 
@@ -247,6 +248,33 @@ def format_two_day_report(forecast: dict, location: Location, threshold: int) ->
     )
 
 
+def day_label_for_offset(d: date, offset: int) -> tuple[str, bool]:
+    """Returns (label, is_today) for a date offset days from today.
+    offset 0 -> "today", offset 1 -> "tomorrow", offset 2+ -> "on <Weekday, D Mon>".
+    """
+    if offset == 0:
+        return "today", True
+    if offset == 1:
+        return "tomorrow", False
+    return f"on {d.strftime('%A, %d %b')}", False
+
+
+def format_week_report(forecast: dict, location: Location, threshold: int, days: int = 7) -> str:
+    """Build a single report covering `days` consecutive days starting today
+    (default 7, i.e. a full week). Requires the forecast to have been fetched
+    with forecast_days >= days."""
+    today = date.today()
+    sections = []
+    for offset in range(days):
+        d = today + timedelta(days=offset)
+        label, is_today = day_label_for_offset(d, offset)
+        windows = find_rain_windows(forecast, threshold, d)
+        part = format_rain_report(windows, location, threshold, label, is_today=is_today)
+        header = "TODAY" if offset == 0 else "TOMORROW" if offset == 1 else d.strftime("%A").upper()
+        sections.append(f"📅 {header} ({d.strftime('%a, %d %b')})\n{part}")
+    return "\n\n".join(sections)
+
+
 # --------------------------------------------------------------------------- #
 # Notifications
 # --------------------------------------------------------------------------- #
@@ -429,18 +457,22 @@ class RainAlertChatBot:
         return f"✅ Rain alert threshold set to {threshold}%."
 
     def handle_rain(self, scope: str = "both") -> str:
-        """scope: 'today', 'tomorrow', or 'both'."""
+        """scope: 'today', 'tomorrow', 'both', or 'week'."""
         if not self.config.location:
             return ("I don't have your location yet. Set it first with:\n"
                      "  set location <your address>")
+
+        forecast_days = 7 if scope == "week" else 2
         try:
-            forecast = self.weather.get_hourly_forecast(self.config.location, forecast_days=2)
+            forecast = self.weather.get_hourly_forecast(self.config.location, forecast_days=forecast_days)
         except WeatherServiceError as exc:
             return f"⚠️  {exc}"
 
         loc = self.config.location
         threshold = self.config.rain_threshold
 
+        if scope == "week":
+            return format_week_report(forecast, loc, threshold, days=7)
         if scope == "both":
             return format_two_day_report(forecast, loc, threshold)
 
@@ -453,6 +485,9 @@ class RainAlertChatBot:
 
     def handle_tomorrow_rain(self) -> str:
         return self.handle_rain("tomorrow")
+
+    def handle_week_rain(self) -> str:
+        return self.handle_rain("week")
 
     def handle_show_location(self) -> str:
         if not self.config.location:
@@ -490,6 +525,7 @@ class RainAlertChatBot:
             "  today rain                 - check if/when rain is expected today\n"
             "  tomorrow rain              - check if/when rain is expected tomorrow\n"
             "  rain forecast              - show both today and tomorrow together\n"
+            "  week rain                  - show the next 7 days, one day at a time\n"
             "  set location <address>     - save your address for forecasting\n"
             "  set coordinates <lat> <lon> [label] - pin an exact spot (bypasses geocoding)\n"
             "  set threshold <0-100>      - set rain-probability alert threshold (default 50)\n"
@@ -534,8 +570,11 @@ class RainAlertChatBot:
         if text == "alert status":
             return self.handle_alert_status()
         if "rain" in text:
+            wants_week = "week" in text or "7 day" in text or "seven day" in text
             wants_today = "today" in text or "now" in text
             wants_tomorrow = "tomorrow" in text or "tmrw" in text
+            if wants_week:
+                return self.handle_rain("week")
             if wants_today and wants_tomorrow:
                 return self.handle_rain("both")
             if wants_tomorrow:
