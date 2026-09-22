@@ -269,6 +269,9 @@ def format_past_day_report(forecast: dict, location: Location, threshold: int, o
     total = sum(w.precipitation_mm for w in windows)
     lines.append(f"   ➜ {len(windows)} rainy hour(s), ~{total:.1f} mm total.")
     return "\n".join(lines)
+
+
+def day_label_for_offset(d: date, offset: int) -> tuple[str, bool]:
     """Returns (label, is_today) for a date offset days from today.
     offset 0 -> "today", offset 1 -> "tomorrow", offset 2+ -> "on <Weekday, D Mon>".
     """
