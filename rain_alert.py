@@ -149,9 +149,15 @@ class WeatherService:
         )
 
     @staticmethod
-    def get_hourly_forecast(location: Location, forecast_days: int = 2) -> dict:
-        """Fetch hourly forecast. Defaults to 2 days so both today and
-        tomorrow are covered by a single API call."""
+    def get_hourly_forecast(location: Location, forecast_days: int = 2, past_days: int = 0) -> dict:
+        """Fetch hourly forecast, optionally including recent past days.
+
+        forecast_days: how many days ahead to include (today counts as day 1).
+        past_days: how many days before today to include (0-92). Open-Meteo
+        fills these with recent-past reanalysis data — what its weather
+        model estimates actually happened, based on observations — not a
+        record of what was predicted in advance.
+        """
         try:
             resp = requests.get(
                 FORECAST_URL,
@@ -161,6 +167,7 @@ class WeatherService:
                     "hourly": "precipitation_probability,precipitation,weathercode",
                     "timezone": location.timezone,
                     "forecast_days": forecast_days,
+                    "past_days": past_days,
                 },
                 timeout=REQUEST_TIMEOUT,
             )
@@ -248,7 +255,20 @@ def format_two_day_report(forecast: dict, location: Location, threshold: int) ->
     )
 
 
-def day_label_for_offset(d: date, offset: int) -> tuple[str, bool]:
+def format_past_day_report(forecast: dict, location: Location, threshold: int, on_date: date, day_label: str) -> str:
+    """Report what the model estimates actually happened on a past date.
+    Framed in past tense; no 'carry an umbrella' style nudges since the
+    day is already over."""
+    windows = find_rain_windows(forecast, threshold, on_date)
+    if not windows:
+        return f"No rain recorded {day_label} in {location.address} (threshold: {threshold}% probability). ☀️"
+
+    lines = [f"🌧️  Rain recorded {day_label} in {location.address} (threshold: {threshold}%):"]
+    for w in windows:
+        lines.append(f"   - {w.time.strftime('%I:%M %p')}: {w.probability}% chance, ~{w.precipitation_mm} mm")
+    total = sum(w.precipitation_mm for w in windows)
+    lines.append(f"   ➜ {len(windows)} rainy hour(s), ~{total:.1f} mm total.")
+    return "\n".join(lines)
     """Returns (label, is_today) for a date offset days from today.
     offset 0 -> "today", offset 1 -> "tomorrow", offset 2+ -> "on <Weekday, D Mon>".
     """
@@ -457,19 +477,27 @@ class RainAlertChatBot:
         return f"✅ Rain alert threshold set to {threshold}%."
 
     def handle_rain(self, scope: str = "both") -> str:
-        """scope: 'today', 'tomorrow', 'both', or 'week'."""
+        """scope: 'today', 'tomorrow', 'both', 'week', or 'yesterday'."""
         if not self.config.location:
             return ("I don't have your location yet. Set it first with:\n"
                      "  set location <your address>")
 
-        forecast_days = 7 if scope == "week" else 2
-        try:
-            forecast = self.weather.get_hourly_forecast(self.config.location, forecast_days=forecast_days)
-        except WeatherServiceError as exc:
-            return f"⚠️  {exc}"
-
         loc = self.config.location
         threshold = self.config.rain_threshold
+
+        if scope == "yesterday":
+            try:
+                forecast = self.weather.get_hourly_forecast(loc, forecast_days=1, past_days=1)
+            except WeatherServiceError as exc:
+                return f"⚠️  {exc}"
+            yesterday = date.today() - timedelta(days=1)
+            return format_past_day_report(forecast, loc, threshold, yesterday, "yesterday")
+
+        forecast_days = 7 if scope == "week" else 2
+        try:
+            forecast = self.weather.get_hourly_forecast(loc, forecast_days=forecast_days)
+        except WeatherServiceError as exc:
+            return f"⚠️  {exc}"
 
         if scope == "week":
             return format_week_report(forecast, loc, threshold, days=7)
@@ -488,6 +516,9 @@ class RainAlertChatBot:
 
     def handle_week_rain(self) -> str:
         return self.handle_rain("week")
+
+    def handle_yesterday_rain(self) -> str:
+        return self.handle_rain("yesterday")
 
     def handle_show_location(self) -> str:
         if not self.config.location:
@@ -526,6 +557,7 @@ class RainAlertChatBot:
             "  tomorrow rain              - check if/when rain is expected tomorrow\n"
             "  rain forecast              - show both today and tomorrow together\n"
             "  week rain                  - show the next 7 days, one day at a time\n"
+            "  yesterday rain             - show what the model estimates fell yesterday\n"
             "  set location <address>     - save your address for forecasting\n"
             "  set coordinates <lat> <lon> [label] - pin an exact spot (bypasses geocoding)\n"
             "  set threshold <0-100>      - set rain-probability alert threshold (default 50)\n"
@@ -570,9 +602,12 @@ class RainAlertChatBot:
         if text == "alert status":
             return self.handle_alert_status()
         if "rain" in text:
+            wants_yesterday = "yesterday" in text
             wants_week = "week" in text or "7 day" in text or "seven day" in text
             wants_today = "today" in text or "now" in text
             wants_tomorrow = "tomorrow" in text or "tmrw" in text
+            if wants_yesterday:
+                return self.handle_rain("yesterday")
             if wants_week:
                 return self.handle_rain("week")
             if wants_today and wants_tomorrow:

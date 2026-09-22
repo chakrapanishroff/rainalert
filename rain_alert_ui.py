@@ -37,15 +37,15 @@ def load_config() -> ra.AppConfig:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_forecast(lat: float, lon: float, address: str, forecast_days: int = 2) -> dict:
+def fetch_forecast(lat: float, lon: float, address: str, forecast_days: int = 2, past_days: int = 0) -> dict:
     """Cached for 10 minutes so slider/toggle changes don't re-hit the API.
 
     Plain floats/strings as args (not the Location dataclass) keep the
-    cache key hashable. forecast_days is part of the key so switching
-    between the 2-day and 7-day view re-fetches only when needed.
+    cache key hashable. forecast_days/past_days are part of the key so
+    switching views re-fetches only when actually needed.
     """
     loc = ra.Location(address=address, latitude=lat, longitude=lon)
-    return ra.WeatherService.get_hourly_forecast(loc, forecast_days=forecast_days)
+    return ra.WeatherService.get_hourly_forecast(loc, forecast_days=forecast_days, past_days=past_days)
 
 
 def render_day_text(forecast: dict, on_date: date, threshold: int, day_label: str, is_today: bool) -> None:
@@ -98,7 +98,7 @@ with st.sidebar:
 
     forecast_range = st.radio(
         "Forecast range",
-        ["Today & Tomorrow", "Next 7 Days"],
+        ["Yesterday", "Today & Tomorrow", "Next 7 Days"],
         index=1,
     )
 
@@ -137,7 +137,8 @@ if not config.location:
 
 st.caption(f"Forecast for **{config.location.address}** · threshold {config.rain_threshold}%")
 
-forecast_days = 7 if forecast_range == "Next 7 Days" else 2
+forecast_days = 7 if forecast_range == "Next 7 Days" else (1 if forecast_range == "Yesterday" else 2)
+past_days = 1 if forecast_range == "Yesterday" else 0
 
 try:
     with st.spinner("Fetching forecast…"):
@@ -146,6 +147,7 @@ try:
             config.location.longitude,
             config.location.address,
             forecast_days,
+            past_days,
         )
 except ra.WeatherServiceError as exc:
     st.error(f"⚠️ {exc}")
@@ -153,7 +155,13 @@ except ra.WeatherServiceError as exc:
 
 today = date.today()
 
-if forecast_range == "Next 7 Days":
+if forecast_range == "Yesterday":
+    yesterday = today - timedelta(days=1)
+    st.subheader(f"YESTERDAY — {yesterday.strftime('%a, %d %b')}")
+    st.caption("Recent-past estimate from the weather model, not a saved earlier forecast.")
+    report = ra.format_past_day_report(forecast, config.location, config.rain_threshold, yesterday, "yesterday")
+    st.text(report)
+elif forecast_range == "Next 7 Days":
     for offset in range(7):
         d = today + timedelta(days=offset)
         label, is_today = ra.day_label_for_offset(d, offset)
