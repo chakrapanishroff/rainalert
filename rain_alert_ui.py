@@ -24,6 +24,10 @@ import rain_alert as ra
 
 st.set_page_config(page_title="Rain Alert", page_icon="🌧️", layout="centered")
 
+# Open-Meteo limits: up to 92 past days and 16 forecast days (today counts as day 1).
+MAX_PAST_DAYS = 92
+MAX_FORECAST_DAYS = 16
+
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -98,9 +102,25 @@ with st.sidebar:
 
     forecast_range = st.radio(
         "Forecast range",
-        ["Yesterday", "Today & Tomorrow", "Next 7 Days"],
+        ["Yesterday", "Today & Tomorrow", "Next 7 Days", "Custom range"],
         index=1,
     )
+
+    custom_range = None
+    if forecast_range == "Custom range":
+        _today = date.today()
+        custom_range = st.date_input(
+            "Date range (from – to)",
+            value=(_today, _today + timedelta(days=2)),
+            min_value=_today - timedelta(days=MAX_PAST_DAYS),
+            max_value=_today + timedelta(days=MAX_FORECAST_DAYS - 1),
+            format="DD/MM/YYYY",
+            help=(
+                f"Pick a start and end date on the calendar. Supports up to "
+                f"{MAX_PAST_DAYS} days back and {MAX_FORECAST_DAYS - 1} days ahead. "
+                "Past dates are model estimates, not saved forecasts."
+            ),
+        )
 
     threshold = st.slider(
         "Rain threshold (%)",
@@ -137,8 +157,21 @@ if not config.location:
 
 st.caption(f"Forecast for **{config.location.address}** · threshold {config.rain_threshold}%")
 
+today = date.today()
+
 forecast_days = 7 if forecast_range == "Next 7 Days" else (1 if forecast_range == "Yesterday" else 2)
 past_days = 1 if forecast_range == "Yesterday" else 0
+
+range_start = range_end = None
+if forecast_range == "Custom range":
+    # st.date_input returns a 1-tuple while the user has only clicked the start date.
+    if not isinstance(custom_range, (tuple, list)) or len(custom_range) != 2:
+        st.info("📅 Pick both a start and an end date on the calendar (sidebar).")
+        st.stop()
+    range_start, range_end = custom_range
+    # Translate the chosen dates into Open-Meteo's past_days / forecast_days.
+    past_days = max(0, (today - range_start).days)
+    forecast_days = max(1, (range_end - today).days + 1)
 
 try:
     with st.spinner("Fetching forecast…"):
@@ -153,9 +186,34 @@ except ra.WeatherServiceError as exc:
     st.error(f"⚠️ {exc}")
     st.stop()
 
-today = date.today()
+if forecast_range == "Custom range":
+    num_days = (range_end - range_start).days + 1
+    st.subheader(f"{range_start.strftime('%a, %d %b %Y')} → {range_end.strftime('%a, %d %b %Y')}")
+    st.caption(f"{num_days} day(s). Past dates are model estimates; future dates are forecasts.")
 
-if forecast_range == "Yesterday":
+    # Summary: count rainy days across the range
+    rainy_days = sum(
+        1 for i in range(num_days)
+        if ra.find_rain_windows(forecast, config.rain_threshold, range_start + timedelta(days=i))
+    )
+    st.metric("Rainy days in range", f"{rainy_days} / {num_days}")
+
+    for i in range(num_days):
+        d = range_start + timedelta(days=i)
+        if d < today:
+            header = "YESTERDAY" if d == today - timedelta(days=1) else d.strftime("%A").upper()
+            st.subheader(f"{header} — {d.strftime('%a, %d %b')}")
+            label = "yesterday" if d == today - timedelta(days=1) else f"on {d.strftime('%A, %d %b')}"
+            st.text(ra.format_past_day_report(forecast, config.location, config.rain_threshold, d, label))
+        else:
+            offset = (d - today).days
+            label, is_today = ra.day_label_for_offset(d, offset)
+            header = "TODAY" if offset == 0 else "TOMORROW" if offset == 1 else d.strftime("%A").upper()
+            st.subheader(f"{header} — {d.strftime('%a, %d %b')}")
+            render_day_text(forecast, d, config.rain_threshold, label, is_today=is_today)
+        if i < num_days - 1:
+            st.divider()
+elif forecast_range == "Yesterday":
     yesterday = today - timedelta(days=1)
     st.subheader(f"YESTERDAY — {yesterday.strftime('%a, %d %b')}")
     st.caption("Recent-past estimate from the weather model, not a saved earlier forecast.")
