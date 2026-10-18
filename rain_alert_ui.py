@@ -17,6 +17,7 @@ Dependencies:
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 
 import streamlit as st
 
@@ -27,6 +28,11 @@ st.set_page_config(page_title="Rain Alert", page_icon="🌧️", layout="centere
 # Open-Meteo limits: up to 92 past days and 16 forecast days (today counts as day 1).
 MAX_PAST_DAYS = 92
 MAX_FORECAST_DAYS = 16
+
+# Every location you save is appended here (next to this script), one per line.
+LOCATIONS_FILE = Path(__file__).resolve().parent / "saved_locations.txt"
+LOCATIONS_HEADER = "# Rain Alert saved locations — one per line: label | latitude | longitude\n"
+SAVED_CHOICE_KEY = "saved_loc_choice"
 
 
 # --------------------------------------------------------------------------- #
@@ -52,6 +58,73 @@ def fetch_forecast(lat: float, lon: float, address: str, forecast_days: int = 2,
     return ra.WeatherService.get_hourly_forecast(loc, forecast_days=forecast_days, past_days=past_days)
 
 
+def _loc_key(loc: ra.Location) -> tuple[float, float]:
+    return (round(loc.latitude, 4), round(loc.longitude, 4))
+
+
+def location_option_label(loc: ra.Location) -> str:
+    return f"{loc.address} ({loc.latitude:.4f}, {loc.longitude:.4f})"
+
+
+def load_saved_locations() -> list[ra.Location]:
+    """Read saved_locations.txt; blank lines, # comments and malformed lines are skipped."""
+    if not LOCATIONS_FILE.exists():
+        return []
+    locs: list[ra.Location] = []
+    for line in LOCATIONS_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.rsplit("|", 2)]
+        if len(parts) != 3:
+            continue
+        try:
+            lat, lon = float(parts[1]), float(parts[2])
+        except ValueError:
+            continue
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            locs.append(ra.Location(address=parts[0] or f"({lat:.4f}, {lon:.4f})", latitude=lat, longitude=lon))
+    return locs
+
+
+def add_saved_location(loc: ra.Location) -> bool:
+    """Append to the text file (or update the label if the same coordinates exist)."""
+    locs = load_saved_locations()
+    for i, existing in enumerate(locs):
+        if _loc_key(existing) == _loc_key(loc):
+            locs[i] = loc
+            break
+    else:
+        locs.append(loc)
+    lines = [
+        f"{l.address.replace('|', '-')} | {l.latitude:.4f} | {l.longitude:.4f}"
+        for l in locs
+    ]
+    try:
+        LOCATIONS_FILE.write_text(LOCATIONS_HEADER + "\n".join(lines) + "\n", encoding="utf-8")
+        return True
+    except OSError as exc:
+        st.warning(f"Could not write {LOCATIONS_FILE.name}: {exc}")
+        return False
+
+
+def remember_location(loc: ra.Location) -> None:
+    """Persist a newly saved location and make the dropdown show it as selected."""
+    add_saved_location(loc)
+    st.session_state[SAVED_CHOICE_KEY] = location_option_label(loc)
+
+
+def _on_pick_saved() -> None:
+    """Dropdown callback: switch the active location to the chosen saved one."""
+    choice = st.session_state.get(SAVED_CHOICE_KEY)
+    for loc in load_saved_locations():
+        if location_option_label(loc) == choice:
+            cfg = st.session_state.config
+            cfg.location = loc
+            cfg.save()
+            break
+
+
 def render_day_text(forecast: dict, on_date: date, threshold: int, day_label: str, is_today: bool) -> None:
     windows = ra.find_rain_windows(forecast, threshold, on_date)
     report = ra.format_rain_report(windows, config.location, threshold, day_label, is_today=is_today)
@@ -67,6 +140,9 @@ config = load_config()
 with st.sidebar:
     st.header("⚙️ Settings")
 
+    # Filled in after the save forms below, so a fresh save can pre-select itself.
+    saved_slot = st.container()
+
     mode = st.radio("Set location by", ["Address", "Coordinates"], horizontal=True)
 
     if mode == "Address":
@@ -79,6 +155,7 @@ with st.sidebar:
                     with st.spinner("Looking up…"):
                         config.location = ra.WeatherService.geocode(address)
                     config.save()
+                    remember_location(config.location)
                     fetch_forecast.clear()
                     st.success(f"Saved: {config.location.address}")
                 except ra.WeatherServiceError as exc:
