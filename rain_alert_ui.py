@@ -172,8 +172,37 @@ with st.sidebar:
                 longitude=lon,
             )
             config.save()
+            remember_location(config.location)
             fetch_forecast.clear()
             st.success(f"Saved: {config.location.address}")
+
+    # Saved-locations dropdown (rendered at the top of the sidebar via saved_slot).
+    # First run: seed the file with the currently active location, if it isn't there.
+    saved = load_saved_locations()
+    if config.location and _loc_key(config.location) not in {_loc_key(l) for l in saved}:
+        add_saved_location(config.location)
+        saved = load_saved_locations()
+
+    with saved_slot:
+        if saved:
+            options = [location_option_label(l) for l in saved]
+            if st.session_state.get(SAVED_CHOICE_KEY) not in options + [None]:
+                del st.session_state[SAVED_CHOICE_KEY]  # stale after the file was edited
+            kwargs = {}
+            if SAVED_CHOICE_KEY not in st.session_state:
+                active = _loc_key(config.location) if config.location else None
+                kwargs["index"] = next((i for i, l in enumerate(saved) if _loc_key(l) == active), None)
+            st.selectbox(
+                "📌 Saved locations",
+                options,
+                key=SAVED_CHOICE_KEY,
+                on_change=_on_pick_saved,
+                placeholder="Choose a saved location",
+                **kwargs,
+            )
+            st.caption(f"Stored in `{LOCATIONS_FILE.name}` next to the app.")
+        else:
+            st.caption("No saved locations yet — save one below and it will appear here.")
 
     st.divider()
 
