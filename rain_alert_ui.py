@@ -46,7 +46,7 @@ def load_config() -> ra.AppConfig:
     return st.session_state.config
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)  # Cache forecasts for 30 minutes
 def fetch_forecast(lat: float, lon: float, address: str, forecast_days: int = 2, past_days: int = 0) -> dict:
     """Cached for 10 minutes so slider/toggle changes don't re-hit the API.
 
