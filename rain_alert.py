@@ -125,10 +125,33 @@ class WeatherServiceError(RuntimeError):
 class WeatherService:
     """Wraps the Open-Meteo geocoding and forecast APIs."""
 
+    MAX_RATE_LIMIT_RETRIES = 3
+
+    @staticmethod
+    def _get_with_rate_limit_retry(url: str, *, params: dict, timeout: int = REQUEST_TIMEOUT):
+        """Retry HTTP 429 responses with a delay instead of immediately hammering the API."""
+        for attempt in range(WeatherService.MAX_RATE_LIMIT_RETRIES + 1):
+            resp = requests.get(url, params=params, timeout=timeout)
+            if resp.status_code != 429 or attempt >= WeatherService.MAX_RATE_LIMIT_RETRIES:
+                return resp
+
+            # Respect Retry-After when provided; otherwise use exponential backoff.
+            retry_after = resp.headers.get("Retry-After")
+            try:
+                delay = float(retry_after) if retry_after else 5 * (2 ** attempt)
+            except (TypeError, ValueError):
+                delay = 5 * (2 ** attempt)
+            delay = max(1, min(delay, 60))
+            log.warning(
+                "Open-Meteo returned HTTP 429; retrying in %s seconds (attempt %s/%s).",
+                delay, attempt + 1, WeatherService.MAX_RATE_LIMIT_RETRIES
+            )
+            time_module.sleep(delay)
+
     @staticmethod
     def geocode(address: str) -> Location:
         try:
-            resp = requests.get(
+            resp = WeatherService._get_with_rate_limit_retry(
                 GEOCODE_URL,
                 params={"name": address, "count": 1, "language": "en", "format": "json"},
                 timeout=REQUEST_TIMEOUT,
@@ -159,7 +182,7 @@ class WeatherService:
         record of what was predicted in advance.
         """
         try:
-            resp = requests.get(
+            resp = WeatherService._get_with_rate_limit_retry(
                 FORECAST_URL,
                 params={
                     "latitude": location.latitude,
@@ -173,6 +196,12 @@ class WeatherService:
             )
             resp.raise_for_status()
         except requests.RequestException as exc:
+            if isinstance(exc, requests.HTTPError) and exc.response is not None and exc.response.status_code == 429:
+                raise WeatherServiceError(
+                    "Open-Meteo is temporarily rate-limiting requests (HTTP 429). "
+                    "Wait 1–2 minutes, avoid repeated refreshes, and try again. "
+                    f"Details: {exc}"
+                ) from exc
             raise WeatherServiceError(f"Could not reach forecast service: {exc}") from exc
 
         return resp.json()
