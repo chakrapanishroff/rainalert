@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Rain Alert Chatbot
-==================
+Rain Alert Chatbot by Sripad Raj
+================================
 
 A conversational assistant that:
   1. Stores your home address (persisted to disk, so you set it once).
